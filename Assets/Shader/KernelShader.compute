@@ -1,0 +1,181 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel UpdateVertex
+#pragma kernel ApplyNoise
+#pragma kernel InitSegment
+#pragma kernel UpdateTargetPosition
+
+#include "CurlNoise.cginc"
+#include "Quaternion.cginc"
+#include "Random.cginc"
+
+struct TorusVertex
+{
+	float3 pos;
+	float3 normal;
+	float2 uv;
+};
+
+struct Segment
+{
+	int index;
+	float3 initPos;
+	float3 pos;
+	float3 direction;
+	float3 normal;
+};
+
+struct Link
+{
+	float3 fromPos;
+	float3 toPos;
+};
+
+float3 _TargetPos;
+float _NumOfSlide;
+float _MaxSegment;
+float _Radius;
+float _T;
+float _Time;
+float _Height;
+
+
+RWStructuredBuffer<Segment> _SegmentBuffer;
+RWStructuredBuffer<TorusVertex> _VertexBuffer;
+RWStructuredBuffer<Link> _LinkBuffer;
+RWStructuredBuffer<float3> _SpherePositions;
+StructuredBuffer<float3> _InitTargetPosition;
+
+float3 GetNormal(float3 direction, float3 position, float3 prev_normal)
+{
+	if (length(direction) == 0)
+		direction = float3(0, 0, 0);
+
+	float4 lookAt = LookAt(direction, prev_normal);
+
+	return RotateWithQuaternion(float3(0, 1, 0), lookAt);
+}
+
+[numthreads(8,1,1)]
+void UpdateVertex (uint id : SV_DispatchThreadID)
+{
+	TorusVertex tv = _VertexBuffer[id];
+
+	float numOfSlide = _NumOfSlide;
+
+	float indexOfSegment = id / (numOfSlide);
+	float indexOfSide = id % numOfSlide;
+
+	float radius = _Radius;
+
+	float index = _SegmentBuffer[indexOfSegment].index;
+	float3 position = _SegmentBuffer[indexOfSegment].pos;
+	float3 direction = _SegmentBuffer[indexOfSegment].direction;
+	float3 normal = _SegmentBuffer[indexOfSegment].normal;
+	
+	float4 rr = AngleAxis(direction, (float)indexOfSide * (360 / numOfSlide));
+	float3 pos = RotateAroundPoint(position + normal * radius, position, rr);
+
+	float t = (sin(indexOfSegment * 0.02 + _Time * 2) + 1) * 0.5;
+	_VertexBuffer[id].uv = t;// float2(t, t);
+	
+	_VertexBuffer[id].pos = pos;
+	_VertexBuffer[id].normal = normalize(pos - position);
+}
+
+[numthreads(8, 1, 1)]
+void ApplyNoise(uint id : SV_DispatchThreadID)
+{
+	float segmentNum = _MaxSegment + 1;
+	float indexOfSegment = ((float)id / segmentNum);
+
+	float3 fromPos = _LinkBuffer[indexOfSegment].fromPos;
+	float3 toPos = _LinkBuffer[indexOfSegment].toPos;
+
+	float3 diff = toPos - fromPos;
+
+	float x = length(diff) / 2;
+	float radius = length(toPos);
+	float z = sqrt(pow(radius, 2) - pow(x, 2));
+	float h = (radius - z) + 1;// pow((), 1.05);
+
+	float sss = fmod(id, segmentNum) / segmentNum;
+	sss *= 1.01;
+	float s = sin(sss * 3.1415926535);
+	s = abs(s);
+	s = saturate(s);
+	s = pow(s, 0.5) * _Height;
+
+	_SegmentBuffer[id].pos = _SegmentBuffer[id].initPos + (normalize((fromPos + toPos) / 2) * s * h);// *2;
+}
+
+[numthreads(8, 1, 1)]
+void UpdateSegment(uint id : SV_DispatchThreadID)
+{
+	//_SegmentBuffer[id].pos
+}
+
+[numthreads(8, 1, 1)]
+void UpdateTargetPosition(uint id : SV_DispatchThreadID)
+{
+	//float i = id / 2;
+	//float3 direction = _LinkBuffer[i].fromPos - _LinkBuffer[i].toPos;
+	////float3 new_targetPos = _InitTargetPosition[i] - direction * ((sin(_Time + id) + 1) * 0.8) * rand(id) * 0.4;
+	//float3 new_targetPos = 0;
+
+	//float t = (i % 20) * 10;
+	//new_targetPos = float3(cos(t + _Time * 0.4) * 100, sin(t + _Time * 0.4) * 100, sin(_Time) * rand(t) * 50);
+
+	//_LinkBuffer[id / 2].toPos = new_targetPos;
+	//
+	//if((id + 1) % 2 == 0)
+	//	_SpherePositions[id] = new_targetPos;
+}
+
+
+[numthreads(16, 1, 1)]
+void InitSegment(uint id : SV_DispatchThreadID)
+{
+	int index = id;
+
+	float3 iniPos = _LinkBuffer[id].fromPos;
+	float3 target_pos = _LinkBuffer[id].toPos;
+
+	int next_id = id + 1;
+
+	float3 prev_pos = 0;
+	float3 prev_normal = 0;
+
+	int segmentNum = _MaxSegment + 1;
+
+	float3 distance = target_pos - iniPos;
+
+	for (int i = 0; i < segmentNum; i++)
+	{
+		int ii = id * segmentNum + i;
+
+		float3 position = iniPos;
+		float3 direction = normalize(distance);
+		float3 normal = GetNormal(direction, position, prev_normal);
+
+		if (i != 0)
+		{
+			prev_pos = _SegmentBuffer[ii - 1].pos;
+			prev_normal = _SegmentBuffer[ii - 1].normal;
+			position = prev_pos + direction * (length(distance) / _MaxSegment);
+		}
+
+		//position += float3(0, 2, 0);
+		//direction = prev_pos - position;
+
+		//position = position;// += float3(0, 3, 0);// (sin(i / segmentNum) * 10000);
+		//direction = (position - prev_pos);
+
+		position.x += 0;
+
+		_SegmentBuffer[ii].index = index;
+		_SegmentBuffer[ii].initPos = position;
+		_SegmentBuffer[ii].pos = position;
+		_SegmentBuffer[ii].direction = direction;
+		_SegmentBuffer[ii].normal = normal;
+	}
+}
